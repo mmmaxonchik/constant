@@ -1,30 +1,39 @@
-#![allow(non_camel_case_types)]
+use std::ffi::{c_char, c_int, c_long};
+use std::mem::zeroed;
+use std::thread;
+use std::time::Duration;
 
-type c_long = i64;
+#[repr(C)]
+struct UtsName {
+    sysname: [c_char; 65],
+    nodename: [c_char; 65],
+    release: [c_char; 65],
+    version: [c_char; 65],
+    machine: [c_char; 65],
+    domainname: [c_char; 65],
+}
 
-extern "C" {
+unsafe extern "C" {
+    fn getpid() -> c_int;
+    fn getppid() -> c_int;
+    fn uname(buf: *mut UtsName) -> c_int;
+    fn sched_yield() -> c_int;
     fn syscall(num: c_long, ...) -> c_long;
 }
 
-const SYS_GETPID: c_long = 39;
-const SYS_GETPPID: c_long = 110;
 const SYS_GETTID: c_long = 186;
-const SYS_UNAME: c_long = 63;
-const SYS_SCHED_YIELD: c_long = 24;
-
 const SYS_GETUID: c_long = 102;
 const SYS_GETGID: c_long = 104;
 const SYS_UMASK: c_long = 95;
-const SYS_GETEGID: c_long = 108;
-const SYS_GETEUID: c_long = 107;
+const SYS_SCHED_YIELD: c_long = 24;
 
 fn branch_target() {
     unsafe {
+        let _ = syscall(SYS_GETTID);
         let _ = syscall(SYS_GETUID);
-        let _ = syscall(SYS_GETEUID);
         let _ = syscall(SYS_GETGID);
-        let _ = syscall(SYS_GETEGID);
         let _ = syscall(SYS_UMASK, 0o22);
+        let _ = syscall(SYS_SCHED_YIELD);
     }
 }
 
@@ -33,33 +42,21 @@ static ANCHOR: [fn(); 1] = [branch_target];
 
 fn main() {
     unsafe {
-        let _ = syscall(SYS_GETPID);
-        let _ = syscall(SYS_GETPPID);
-        let _ = syscall(SYS_GETTID);
+        let _ = getpid();
+        let _ = getppid();
 
-        #[repr(C)]
-        struct utsname {
-            sysname: [u8; 65],
-            nodename: [u8; 65],
-            release: [u8; 65],
-            version: [u8; 65],
-            machine: [u8; 65],
-            domainname: [u8; 65],
-        }
-        let mut u = utsname {
-            sysname: [0; 65],
-            nodename: [0; 65],
-            release: [0; 65],
-            version: [0; 65],
-            machine: [0; 65],
-            domainname: [0; 65],
-        };
-        let _ = syscall(SYS_UNAME, &mut u as *mut _);
-
-        let _ = syscall(SYS_SCHED_YIELD);
+        let mut u: UtsName = zeroed();
+        let _ = uname(&mut u as *mut UtsName);
     }
 
-    if std::env::var("RUN_NEVER_BRANCH").ok().as_deref() == Some("1") {
+    thread::sleep(Duration::from_millis(13));
+
+    unsafe {
+        let _ = sched_yield();
+    }
+
+    let never = false;
+    if never {
         (ANCHOR[0])();
     }
 }

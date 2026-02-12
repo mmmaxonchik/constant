@@ -1,18 +1,31 @@
 #![allow(non_camel_case_types)]
 
-type c_long = i64;
-type c_int = i32;
+use std::ffi::{c_int, c_void};
+
 type size_t = usize;
+type ssize_t = isize;
 
-extern "C" {
-    fn syscall(num: c_long, ...) -> c_long;
+unsafe extern "C" {
+    fn socketpair(domain: c_int, typ: c_int, protocol: c_int, sv: *mut c_int) -> c_int;
+    fn sendto(
+        sockfd: c_int,
+        buf: *const c_void,
+        len: size_t,
+        flags: c_int,
+        dest_addr: *const c_void,
+        addrlen: c_int,
+    ) -> ssize_t;
+    fn recvfrom(
+        sockfd: c_int,
+        buf: *mut c_void,
+        len: size_t,
+        flags: c_int,
+        src_addr: *mut c_void,
+        addrlen: *mut c_int,
+    ) -> ssize_t;
+    fn shutdown(sockfd: c_int, how: c_int) -> c_int;
+    fn close(fd: c_int) -> c_int;
 }
-
-const SYS_SOCKETPAIR: c_long = 53;
-const SYS_SENDTO: c_long = 44;
-const SYS_RECVFROM: c_long = 45;
-const SYS_SHUTDOWN: c_long = 48;
-const SYS_CLOSE: c_long = 3;
 
 const AF_UNIX: c_int = 1;
 const SOCK_STREAM: c_int = 1;
@@ -20,35 +33,29 @@ const SHUT_RDWR: c_int = 2;
 
 fn main() {
     unsafe {
-        let mut fds = [0i32; 2];
-
-        let _ = syscall(SYS_SOCKETPAIR, AF_UNIX, SOCK_STREAM, 0, fds.as_mut_ptr());
+        let mut fds = [0 as c_int; 2];
+        let _ = socketpair(AF_UNIX, SOCK_STREAM, 0, fds.as_mut_ptr());
 
         let mut buf = [b'A'; 1];
-        
-        let _ = syscall(
-            SYS_SENDTO,
-            fds[0] as c_int,
-            buf.as_ptr(),
-            1 as size_t,
-            0 as c_int,
-            0 as *const core::ffi::c_void,
-            0 as c_int,
+        let _ = sendto(
+            fds[0],
+            buf.as_ptr() as *const c_void,
+            1,
+            0,
+            std::ptr::null(),
+            0,
+        );
+        let _ = recvfrom(
+            fds[1],
+            buf.as_mut_ptr() as *mut c_void,
+            1,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
         );
 
-        let _ = syscall(
-            SYS_RECVFROM,
-            fds[1] as c_int,
-            buf.as_mut_ptr(),
-            1 as size_t,
-            0 as c_int,
-            0 as *mut core::ffi::c_void,
-            0 as *mut c_int,
-        );
-
-        let _ = syscall(SYS_SHUTDOWN, fds[0] as c_int, SHUT_RDWR as c_int);
-        
-        let _ = syscall(SYS_CLOSE, fds[0] as c_int);
-        let _ = syscall(SYS_CLOSE, fds[1] as c_int);
+        let _ = shutdown(fds[0], SHUT_RDWR);
+        let _ = close(fds[0]);
+        let _ = close(fds[1]);
     }
 }

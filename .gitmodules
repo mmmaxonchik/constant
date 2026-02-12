@@ -1,0 +1,12 @@
+[submodule "test/src/instruments/sysfilter"]
+	path = test/src/instruments/sysfilter
+	url = git@gitlab.com:Egalito/sysfilter.git
+[submodule "test/src/instruments/SysPartCode"]
+	path = test/src/instruments/SysPartCode
+	url = git@github.com:vidyalakshmir/SysPartCode.git
+[submodule "test/src/instruments/temporal-specialization"]
+	path = test/src/instruments/temporal-specialization
+	url = git@github.com:shamedgh/temporal-specialization.git
+[submodule "test/src/instruments/Chestnut"]
+	path = test/src/instruments/Chestnut
+	url = git@github.com:isec-tugraz/Chestnut.git

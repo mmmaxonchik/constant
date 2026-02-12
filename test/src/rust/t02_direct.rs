@@ -1,19 +1,51 @@
 #![allow(non_camel_case_types)]
 
+use std::arch::asm;
+use std::ffi::c_char;
+
 type c_long = i64;
 
 #[repr(C)]
-struct utsname {
-    sysname: [u8; 65],
-    nodename: [u8; 65],
-    release: [u8; 65],
-    version: [u8; 65],
-    machine: [u8; 65],
-    domainname: [u8; 65],
+struct UtsName {
+    sysname: [c_char; 65],
+    nodename: [c_char; 65],
+    release: [c_char; 65],
+    version: [c_char; 65],
+    machine: [c_char; 65],
+    domainname: [c_char; 65],
 }
 
-extern "C" {
-    fn syscall(num: c_long, ...) -> c_long;
+#[inline(always)]
+unsafe fn sc0(n: c_long) -> c_long {
+    let ret: c_long;
+    unsafe {
+        asm!(
+            "syscall",
+            in("rax") n,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack)
+        );
+    }
+    ret
+}
+
+#[inline(always)]
+unsafe fn sc1(n: c_long, a1: c_long) -> c_long {
+    let ret: c_long;
+    unsafe {
+        asm!(
+            "syscall",
+            in("rax") n,
+            in("rdi") a1,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack)
+        );
+    }
+    ret
 }
 
 const SYS_GETPID: c_long = 39;
@@ -24,11 +56,11 @@ const SYS_SCHED_YIELD: c_long = 24;
 
 fn main() {
     unsafe {
-        let _ = syscall(SYS_GETPID);
-        let _ = syscall(SYS_GETPPID);
-        let _ = syscall(SYS_GETTID);
+        let _ = sc0(SYS_GETPID);
+        let _ = sc0(SYS_GETPPID);
+        let _ = sc0(SYS_GETTID);
 
-        let mut u = utsname {
+        let mut u = UtsName {
             sysname: [0; 65],
             nodename: [0; 65],
             release: [0; 65],
@@ -36,8 +68,8 @@ fn main() {
             machine: [0; 65],
             domainname: [0; 65],
         };
-        let _ = syscall(SYS_UNAME, &mut u as *mut _);
+        let _ = sc1(SYS_UNAME, &mut u as *mut _ as c_long);
 
-        let _ = syscall(SYS_SCHED_YIELD);
+        let _ = sc0(SYS_SCHED_YIELD);
     }
 }
