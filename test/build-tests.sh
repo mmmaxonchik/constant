@@ -28,10 +28,11 @@ MANIFEST="${OUT_ROOT}/manifest.txt"
 log() { echo "$*" | tee -a "${MANIFEST}"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-
 export LANG=C
 export LC_ALL=C
 export TZ=UTC
+
+FAIL_ON_BUILD_ERROR="${FAIL_ON_BUILD_ERROR:-1}"
 
 TIMEOUT_SECS="${TIMEOUT_SECS:-5}"
 TRACE_ENV=(env LANG=C LC_ALL=C TZ=UTC)
@@ -120,10 +121,9 @@ build_and_trace() {
   fi
 }
 
-
 build_c_family() {
-  local lang="$1"      
-  local compiler="$2"  
+  local lang="$1"
+  local compiler="$2"
   local src="$3"
   local out_dir="$4"
 
@@ -183,15 +183,21 @@ build_c_family() {
           if [[ $rc -ne 0 ]]; then
             log "      - failed (see $(basename "$blog"))"
             rm -f "$out" 2>/dev/null || true
+
+            if [[ "$FAIL_ON_BUILD_ERROR" -eq 1 ]]; then
+              log "      ! stopping due to build failure"
+              return 1
+            fi
+
             continue
           fi
+
           build_and_trace "$out" "$out_dir"
         done
       done
     done
   done
 }
-
 
 build_go() {
   local src="$1"
@@ -209,7 +215,6 @@ build_go() {
   fi
 
   local buildmodes=("exe" "pie")
-
   local variant_tags=("rel" "dbg" "strip")
 
   for bm in "${buildmodes[@]}"; do
@@ -232,12 +237,17 @@ build_go() {
         if [[ $rc -ne 0 ]]; then
           log "      - failed (see $(basename "$blog"))"
           rm -f "$out" 2>/dev/null || true
+
+          if [[ "$FAIL_ON_BUILD_ERROR" -eq 1 ]]; then
+            log "      ! stopping due to build failure"
+            return 1
+          fi
+
           continue
         fi
         build_and_trace "$out" "$out_dir"
 
       else
-        # cgo enabled (even if unused) — can differ from pure build on some systems
         local out1="${out_dir}/${TEST}_go_cgo_enabled_${bm}_${v_tag}"
         local blog1="${out1}.build.log"
         log "    * build: $(basename "$out1")"
@@ -250,9 +260,13 @@ build_go() {
         else
           log "      - failed (see $(basename "$blog1"))"
           rm -f "$out1" 2>/dev/null || true
+
+          if [[ "$FAIL_ON_BUILD_ERROR" -eq 1 ]]; then
+            log "      ! stopping due to build failure"
+            return 1
+          fi
         fi
 
-        # pure (cgo disabled)
         local out2="${out_dir}/${TEST}_go_pure_${bm}_${v_tag}"
         local blog2="${out2}.build.log"
         log "    * build: $(basename "$out2")"
@@ -265,12 +279,16 @@ build_go() {
         else
           log "      - failed (see $(basename "$blog2"))"
           rm -f "$out2" 2>/dev/null || true
+
+          if [[ "$FAIL_ON_BUILD_ERROR" -eq 1 ]]; then
+            log "      ! stopping due to build failure"
+            return 1
+          fi
         fi
       fi
     done
   done
 }
-
 
 build_rust() {
   local src="$1"
@@ -317,6 +335,12 @@ build_rust() {
         if [[ $rc -ne 0 ]]; then
           log "      - failed (see $(basename "$blog"))"
           rm -f "$out" 2>/dev/null || true
+
+          if [[ "$FAIL_ON_BUILD_ERROR" -eq 1 ]]; then
+            log "      ! stopping due to build failure"
+            return 1
+          fi
+
           continue
         fi
         build_and_trace "$out" "$out_dir"
@@ -337,18 +361,21 @@ build_rust() {
     else
       log "      - failed (see $(basename "$blog"))"
       rm -f "$out" 2>/dev/null || true
+
+      if [[ "$FAIL_ON_BUILD_ERROR" -eq 1 ]]; then
+        log "      ! stopping due to build failure"
+        return 1
+      fi
     fi
   else
     log "    ! musl target not available; Rust static variant skipped"
   fi
 }
 
-
 log "=== Test: ${TEST} (args: ${PROG_ARGS[*]-}) ==="
 log "=== Looking for sources in: ${SRC_DIR}/{c,cpp,go,rust} ==="
 
 built_any=0
-
 
 c_src="${SRC_DIR}/c/${TEST}.c"
 if [[ -f "$c_src" ]]; then
@@ -360,7 +387,6 @@ if [[ -f "$c_src" ]]; then
   if have clang; then build_c_family "c" "clang" "$c_src" "$c_out"; else log "  ! clang not found; C(clang) skipped"; fi
 fi
 
-
 cpp_src="${SRC_DIR}/cpp/${TEST}.cpp"
 if [[ -f "$cpp_src" ]]; then
   built_any=1
@@ -371,7 +397,6 @@ if [[ -f "$cpp_src" ]]; then
   if have clang++; then build_c_family "cpp" "clang++" "$cpp_src" "$cpp_out"; else log "  ! clang++ not found; C++(clang++) skipped"; fi
 fi
 
-
 go_src="${SRC_DIR}/go/${TEST}.go"
 if [[ -f "$go_src" ]]; then
   built_any=1
@@ -380,7 +405,6 @@ if [[ -f "$go_src" ]]; then
   log "== Found Go: $go_src -> $go_out =="
   build_go "$go_src" "$go_out"
 fi
-
 
 rs_src="${SRC_DIR}/rust/${TEST}.rs"
 if [[ -f "$rs_src" ]]; then
@@ -396,7 +420,6 @@ if [[ "$built_any" -eq 0 ]]; then
   exit 1
 fi
 
-
 summarize_dir() {
   local dir="$1"
   local out="$2"
@@ -411,7 +434,6 @@ summarize_dir "${OUT_ROOT}/c"    "${OUT_ROOT}/${TEST}.c.all.syscalls"    || true
 summarize_dir "${OUT_ROOT}/cpp"  "${OUT_ROOT}/${TEST}.cpp.all.syscalls"  || true
 summarize_dir "${OUT_ROOT}/go"   "${OUT_ROOT}/${TEST}.go.all.syscalls"   || true
 summarize_dir "${OUT_ROOT}/rust" "${OUT_ROOT}/${TEST}.rust.all.syscalls" || true
-
 
 if compgen -G "${OUT_ROOT}/*/*.syscalls" > /dev/null; then
   cat "${OUT_ROOT}"/*/*.syscalls | sort -u > "${OUT_ROOT}/${TEST}.all.syscalls"
