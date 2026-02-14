@@ -65,7 +65,6 @@ RUN --mount=type=ssh \
     git fetch --depth=1 origin 839c39d4ee91c993c92fd312ca70b7d0d7bd1b83 && \
     git checkout 839c39d4ee91c993c92fd312ca70b7d0d7bd1b83
 WORKDIR /workspace/chestnut/
-COPY test/src/chestnut/main.py /workspace/chestnut/Binalyzer/main.py
 # Binalyzer
 FROM ubuntu:18.04 AS confine_clone
 ENV DEBIAN_FRONTEND=noninteractive
@@ -83,7 +82,6 @@ RUN --mount=type=ssh \
     git fetch --depth=1 origin a75dad3ad336e6258a42cd1ce4af061eea68ed76 && \
     git checkout a75dad3ad336e6258a42cd1ce4af061eea68ed76
 WORKDIR /workspace/confine/
-COPY test/src/confine/main.py /workspace/confine/main.py
 # .
 FROM ubuntu:18.04 AS tests_build
 SHELL ["/bin/bash", "-lc"]
@@ -116,7 +114,10 @@ RUN set -eux; \
 ENV PATH="/root/.cargo/bin:${PATH}"
 WORKDIR /workspace
 COPY test/build-tests.sh /workspace/test/build-tests.sh
-COPY test/src /workspace/test/src
+COPY test/src/c /workspace/test/src/c
+COPY test/src/cpp /workspace/test/src/cpp
+COPY test/src/rust /workspace/test/src/rust
+COPY test/src/go /workspace/test/src/go
 RUN set -euxo pipefail; \
     mapfile -t tests < <(find test/src/c test/src/cpp test/src/go test/src/rust -maxdepth 1 -type f \
       \( -name 't*.c' -o -name 't*.cpp' -o -name 't*.go' -o -name 't*.rs' \) \
@@ -129,3 +130,73 @@ RUN set -euxo pipefail; \
         exit 1; \
       }; \
     done
+# test/build/*
+FROM ubuntu:18.04 AS final
+SHELL ["/bin/bash", "-lc"]
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates \
+      libc6-dbg \
+      libstdc++6-7-dbg \
+      libunwind-dev \
+      python3.7 python3-pip binutils gcc libc6-dev linux-libc-dev build-essential \
+      file && \
+    rm -rf /var/lib/apt/lists/*
+RUN mkdir -p \
+      /opt/tools/bin \
+      /opt/sysfilter/lib \
+      /opt/syspart/lib \
+      /opt/chestnut \
+      /opt/confine \
+      /opt/test \
+      /workspace
+COPY --from=sysfilter_build \
+    /workspace/sysfilter/extraction/app/build_x86_64/sysfilter_extract \
+    /opt/tools/bin/sysfilter_extract.bin
+COPY --from=sysfilter_build \
+    /workspace/sysfilter/extraction/egalito/src/libegalito.so \
+    /opt/sysfilter/lib/
+COPY --from=sysfilter_build \
+    /workspace/sysfilter/extraction/egalito/dep/capstone/install/lib/libcapstone.so.5 \
+    /opt/sysfilter/lib/
+COPY --from=sysfilter_build \
+    /workspace/sysfilter/extraction/egalito/dep/distorm3/make/linux/libdistorm3.so \
+    /opt/sysfilter/lib/
+COPY --from=syspart_build \
+    /workspace/SysPartCode/analysis/app/build_x86_64/syspart \
+    /opt/tools/bin/syspart.bin
+COPY --from=syspart_build \
+    /workspace/SysPartCode/analysis/tools/egalito/src/build_x86_64/libegalito.so \
+    /opt/syspart/lib/
+COPY --from=syspart_build \
+    /workspace/SysPartCode/analysis/tools/egalito/dep/capstone/install/lib/libcapstone.so.4 \
+    /opt/syspart/lib/
+COPY --from=syspart_build \
+    /workspace/SysPartCode/analysis/tools/egalito/dep/distorm3/make/linux/libdistorm3.so \
+    /opt/syspart/lib/
+COPY --from=chestnut_clone \
+    /workspace/chestnut/Binalyzer \
+    /opt/chestnut/Binalyzer
+RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN python3 -m pip install --no-cache-dir -r /opt/chestnut/Binalyzer/requirements.txt
+COPY --from=confine_clone \
+    /workspace/confine \
+    /opt/confine
+COPY --from=tests_build \
+    /workspace/test/build \
+    /opt/test/build
+RUN cat > /opt/tools/bin/sysfilter_extract <<'SH' && chmod +x /opt/tools/bin/sysfilter_extract
+#!/bin/sh
+export LD_LIBRARY_PATH=/opt/sysfilter/lib
+exec /opt/tools/bin/sysfilter_extract.bin "$@"
+SH
+RUN cat > /opt/tools/bin/syspart <<'SH' && chmod +x /opt/tools/bin/syspart
+#!/bin/sh
+export LD_LIBRARY_PATH=/opt/syspart/lib
+exec /opt/tools/bin/syspart.bin "$@"
+SH
+COPY test/src/chestnut/main.py /opt/chestnut/Binalyzer/main.py
+COPY test/src/confine/main.py /opt/confine/main.py
+ENV PATH="/opt/tools/bin:${PATH}"
+WORKDIR /workspace
+CMD ["/bin/bash"]

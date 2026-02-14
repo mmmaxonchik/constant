@@ -35,20 +35,17 @@ def analyze_one_binary(
     logger: logging.Logger,
 ) -> Tuple[Set[int], Set[int], Tuple[int, int]]:
     ba = binaryAnalysis.BinaryAnalysis(binary_path, logger)
-
-    direct_set, success_count, fail_count = ba.extractDirectSyscalls()
+    result = ba.extractDirectSyscalls()
+    if result is None:
+        print("Failed to analyze binary!")
+        sys.exit(1)
+    direct_set, success_count, fail_count = result
     indirect_set = ba.extractIndirectSyscalls(libc_cfg)
 
     return direct_set, indirect_set, (success_count, fail_count)
 
 
-def analyze_binaries(
-    binaries: list[str],
-    callgraph_path: str,
-    separator: str = ":",
-    maptype: str = "awk",
-    debug: bool = False,
-) -> Dict[str, dict]:
+def analyze_binaries(binaries, callgraph_path, separator=":", maptype="awk", debug=False):
     logger = build_logger(debug=debug)
 
     libc_cfg = load_libc_cfg(callgraph_path, separator, logger)
@@ -84,7 +81,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("binaries", nargs="+")
     p.add_argument("--callgraph", required=True)
-    p.add_argument("--sep", default="->")
+    p.add_argument("--sep", default=":")
     p.add_argument("--maptype", default="awk")
     p.add_argument("--debug", action="store_true")
     args = p.parse_args()
@@ -97,7 +94,7 @@ if __name__ == "__main__":
         debug=args.debug,
     )
 
-    
     for bin_path, r in result.items():
-        for name in r["all_names"]:
-            print(name)
+        out = os.path.join(CONFINE_ROOT, os.path.basename(bin_path) + ".syscall")
+        with open(out, "w") as file:
+            file.write("\n".join(r["all_names"]))

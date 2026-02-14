@@ -100,9 +100,10 @@ def main(fnames):
                 used_syscalls.update(set(whitelist[wlib]))
 
     used_syscalls.discard(-1)
-    for s_call in used_syscalls:
-        print(s_call)
-    
+    out = os.path.join(cfg.cached_results_folder, os.path.basename(fnames[0]) + ".syscall")
+    with open(out, "w") as file:
+        file.write("\n".join(map(str, used_syscalls)))
+     
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
