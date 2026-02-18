@@ -1,10 +1,197 @@
-import syscalls
-import cfg
-import symbols
 import sys
-import os
+from elftools.elf.elffile import ELFFile
+import capstone
+import re
+import csv
+from full_ldd import get_dependencies
 import json
-import full_ldd
+import lief
+import subprocess
+import policy
+import os
+import cfg
+
+MAX_BT = 200
+
+try:
+    from subprocess import DEVNULL # py3k
+except ImportError:
+    import os
+    DEVNULL = open(os.devnull, 'wb')
+
+def extend_register(r):
+    # 4 general purpose register
+    res = re.match("[e|r]*([a-d])[x|l]", r)
+    if res: return "r%sx" % res[1]
+    res = re.match("[e|r]*([s|d])il?", r)
+    if res: return "r%si" % res[1]
+    res = re.match("[e|r]*([s|b])pl?", r)
+    if res: return "r%sp" % res[1]
+    res = re.match("r([0-9]+)[d|w|b]?", r)
+    if res: return "r%s" % res[1]
+    return r
+
+
+def recursive_imm_lookup(rset, r):
+    if r in rset:
+        if rset[r]["type"] == "value":
+            return {"type": "value", "value": rset[r]["value"]}
+        else:
+            return recursive_imm_lookup(rset, rset[r]["value"])
+    else:
+        return {"type": "register", "value": r}
+
+
+def find_syscall_nr(insn, i):
+    reg_set = {} # we don't know any register values
+    # backtrace from syscall to find assignment to *ax
+    for bt in range(MAX_BT):
+        try:
+            (regs_read, regs_write) = insn[i - bt].regs_access()
+            # only look at register assignments
+            for r in regs_write:
+                # for now: only look at movs and xors
+                if ("mov" in insn[i - bt].mnemonic or "xor" in insn[i - bt].mnemonic):
+                    if len(insn[i - bt].operands) != 2:
+                        print("ERROR: instruction type not supported!")
+                        print(f'0x{insn[i - bt].address:x}:\t{insn[i - bt].mnemonic}\t{insn[i - bt].op_str}')
+                    else:
+                        # extract source and target operands
+                        target = extend_register(insn[i - bt].reg_name(insn[i - bt].operands[0].value.reg))
+                        source = insn[i - bt].operands[1]
+
+                        val = {"type": "value", "value": 0} # default for xor
+                        # support registers and immediates (no memory operations, because we don't know what there is)
+                        if source.type == capstone.x86.X86_OP_REG and "mov" in insn[i - bt].mnemonic:
+                            val = recursive_imm_lookup(reg_set, extend_register(insn[i - bt].reg_name(source.value.reg)))
+                        elif source.type == capstone.x86.X86_OP_IMM:
+                            val = {"type": "value", "value": source.value.imm}
+
+                        if target not in reg_set:
+                            reg_set[target] = val
+                else:
+                    pass
+
+            # check if we have a numeric value for rax (=syscall number)
+            rax = recursive_imm_lookup(reg_set, "rax")
+            if rax["type"] == "value":
+                return int(rax["value"])
+        except:
+            pass
+
+    return -1
+
+
+def find_syscall_locations(insn):
+    syscalls = []
+    for i in range(len(insn)):
+        # find syscall
+        try:
+            if capstone.x86.X86_GRP_INT in insn[i].groups and "syscall" in insn[i].mnemonic:
+                syscalls.append((i, insn[i].address))
+        except:
+            continue
+    return syscalls
+
+
+def find_syscalls(insn):
+    syscalls = set()
+    sys_ins = find_syscall_locations(insn)
+    for i in range(len(sys_ins)):
+        nr = find_syscall_nr(insn, sys_ins[i][0])
+        # end of search, check result
+        if nr != -1:
+            syscalls.add(nr)
+        else:
+            print("ERROR: could not get syscall number @ %s" % hex(int(sys_ins[i][1])))
+            print("--------")
+    return list(syscalls)
+
+
+
+def print_syscalls(syscalls):
+    with open('csv/syscalls_x86_64.csv') as csvfile:
+        tbl = csv.reader(csvfile)
+        for row in tbl:
+            if int(row[0]) in syscalls:
+                print(row[1])
+                
+                
+def print_blocked_syscalls(syscalls):
+    blocked = 0
+    with open('csv/syscalls_x86_64.csv') as csvfile:
+        tbl = csv.reader(csvfile)
+        for row in tbl:
+            if int(row[0]) not in syscalls:
+                print(row[1])
+                blocked += 1
+    return blocked
+
+
+def get_blocked_syscalls(syscalls):
+    blocked = []
+    with open('csv/syscalls_x86_64.csv') as csvfile:
+        tbl = csv.reader(csvfile)
+        for row in tbl:
+            if int(row[0]) not in syscalls:
+                blocked.append(row[1])
+    return blocked
+
+def init(fname):
+    with open(fname, 'rb') as f:
+        elf = ELFFile(f)
+        code = elf.get_section_by_name('.text')
+        ops = code.data()
+        addr = code['sh_addr']
+        md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+        md.detail = True
+        # set skip data otherwise capstone stops when it cannot disasm an instruction
+        md.skipdata = True
+
+        # disassemble with meta information
+        insn = []
+        for i in md.disasm(ops, addr):
+            insn.append(i)
+        return insn
+    return []
+
+
+def get_syscalls(fname):
+    # find syscalls
+    try:
+        insn = init(fname)
+        return find_syscalls(insn)
+    except:
+        return []
+
+
+def modify_elf(syscalls, fname):
+    print("[+] Modifying %s to add syscalls in note section" % fname)
+    os.makedirs("modified_binaries", exist_ok=True)
+    binary = lief.ELF.parse(fname)
+    # ugly but the framework only allows to encode the list as a single byte
+    # extend all syscalls to length 3, create a list of each to split after each char
+    # flatten list of lists. Launcher then can extract three consecutive bytes to
+    # recreate syscall number
+    try:
+        _, filename = os.path.split(fname)
+        with open(os.path.join(cfg.cached_results_folder, filename + "_syscalls"), "w") as f:
+            f.write(' '.join([str(x) for x in sorted(syscalls)]))
+        list_of_lists = [list(str(x).zfill(3)) for x in syscalls]
+        flattened_syscalls = [int(y) for x in list_of_lists for y in x]
+        note = lief.ELF.Note("IAIK", lief.ELF.NOTE_TYPES.UNKNOWN, flattened_syscalls)
+        note = binary.add(note)
+        new_binary = os.path.join("modified_binaries", filename + "_modified")
+        # inject sandboxing library
+        binary.add_library("libsandboxing.so")
+        # add seccomp library as well
+        binary.add_library("libseccomp.so.2")
+        binary.write(new_binary)
+        # note does not have type 0x402 but standalone launcher ignores that value and simply looks for the name
+        subprocess.call(["objcopy --rename-section .note=.note.syscalls " + new_binary ], shell=True, stdout=DEVNULL, stderr=subprocess.STDOUT)
+    except PermissionError:
+        pass
+
 
 def filter_file(fname):
     f = fname.replace("/", "_") + ".json"
@@ -13,97 +200,39 @@ def filter_file(fname):
     return f
 
 
-def load_filters(fname):
-    filters = {}
-    fn = os.path.join(cfg.cached_results_folder, filter_file(fname))
-    print("Load filter %s" % fn)
-    if not os.path.isfile(fn):
-        filters = cfg.extract_syscalls(fname)
-        if not filters:
-            # cfg-based analysis failed
-            return None
-        with open(fn, "w") as out:
-            json.dump(filters, out, sort_keys=True, indent=4, separators=(',', ': '))
-    
-    try: 
-        with open(fn) as ff:
-            filters = json.load(ff)
-    except FileNotFoundError:
-        filters = None
-    return filters
-
-def required_functions(fnames):
-    functions = set()
-    for fname in fnames:
-        sym = symbols.from_elf(fname)
-        if ".dynsym" in sym:
-            s = sym[".dynsym"]
-            functions.update(set(s))
-    return functions
-
-
 def main(fnames):
-    os.makedirs(cfg.cached_results_folder, exist_ok=True)
-
+    # get set of syscalls that can be blocked for all binaries
+    all_syscalls = set()
     files = set()
     for fname in fnames:
         files.update([fname])
-        files.update(set(syscalls.get_dependencies(fname)))
+        files.update(set(get_dependencies(fname)))
     print(files)
-    
-    print("Required functions")
-    fncs = required_functions(files)
-    
-    print("Load whitelist")
+
+    # get syscall whitelist (if exists)
     whitelist = {}
     try:
-        with open(os.path.join(cfg.cached_results_folder, "function_whitelist.json")) as wl:
+        with open("whitelists/function_whitelist.json") as wl:
             whitelist = json.loads(wl.read())
     except:
         pass
 
-    
-    print("Extracting syscalls")
-    used_syscalls = set()
-
     for fname in files:
-        # for a static binary we don't need to build the cfg
-        # we just extract all syscalls that we find in it
-        if full_ldd.is_static(fname):
-            used_syscalls.update(set(syscalls.get_syscalls(fname)))
-        else:
-            filters = load_filters(fname)
-            if filters:
-                for fnc in fncs:
-                    if fnc in filters:
-                        used_syscalls.update(set(filters[fnc]))
-                    if fnc in whitelist:
-                        used_syscalls.update(set(whitelist[fnc]))
-            else:
-                # cfg analysis failed, fall back to naive method of extracting all syscalls
-                used_syscalls.update(set(syscalls.get_syscalls(fname)))
-    print("")
-    
-    # get syscall whitelist (if exists)
-    whitelist = {}
-    try:
-        whitelist = json.load(open("whitelists/whitelist.json"))
-    except:
-        pass
-    
-    for fname in files:
-        # add all syscalls from dynamic loader 
-        if "/ld-" in fname:
-            used_syscalls.update(set(syscalls.get_syscalls(fname)))
+        syscalls = get_syscalls(fname)
+        all_syscalls |= set(syscalls)
         for wlib in whitelist:
             if wlib in fname:
-                used_syscalls.update(set(whitelist[wlib]))
+                all_syscalls |= set(whitelist[wlib])
+        print("[+] Found %d syscalls for %s (%d in total)" % (len(syscalls), fname, len(all_syscalls)))
 
-    used_syscalls.discard(-1)
-    out = os.path.join(cfg.cached_results_folder, os.path.basename(fnames[0]) + ".syscall")
-    with open(out, "w") as file:
-        file.write("\n".join(map(str, used_syscalls)))
-     
+    all_blocked = get_blocked_syscalls(all_syscalls)    
+    print("[!] Blocking %d syscalls" % len(all_blocked))
+    print("[!] Blocked syscalls: ", all_blocked, all_syscalls)
+    with open(os.path.join(cfg.cached_results_folder, "syscalls_%s" % filter_file(fnames[0])), "w") as ff:
+        json.dump(sorted(list(all_syscalls)), ff);
+
+    with open(os.path.join(cfg.cached_results_folder, "policy_%s" % filter_file(fnames[0])), "w") as ff:
+        json.dump(policy.create(all_syscalls), ff)
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

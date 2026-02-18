@@ -140,8 +140,9 @@ RUN apt-get update && \
       libstdc++6-7-dbg \
       libunwind-dev \
       python3.7 python3-pip binutils gcc libc6-dev linux-libc-dev build-essential \
-      file && \
-    rm -rf /var/lib/apt/lists/*
+      file golang-go git && \
+    rm -rf /var/lib/apt/lists/* && \
+    go get -u github.com/xfernando/go2seccomp
 RUN mkdir -p \
       /opt/tools/bin \
       /opt/sysfilter/lib \

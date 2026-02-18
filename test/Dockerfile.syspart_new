@@ -1,0 +1,27 @@
+FROM ubuntu:22.04 AS syspart_new_build
+ENV DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-lc"]
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      make g++ build-essential \
+      libreadline-dev gdb lsb-release unzip \
+      libc6-dbg libstdc++6-10-dbg \
+      libunwind-dev python3 \
+      git openssh-client ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
+RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh && \
+    ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> /root/.ssh/known_hosts
+RUN --mount=type=ssh \
+    git clone --depth=1 git@github.com:vidyalakshmir/SysPartCode.git /workspace/SysPartCode && \
+    cd /workspace/SysPartCode && \
+    git fetch --depth=1 origin 949e3339023dca94cfd2e67beefe409187e5da81 && \
+    git checkout 949e3339023dca94cfd2e67beefe409187e5da81 && \
+    git submodule sync --recursive && \
+    git submodule update --init --recursive
+WORKDIR /workspace/SysPartCode
+RUN ./build_upgraded_egalito.sh
+# analysis/app/build_x86_64/syspart
+# libegalito.so => /workspace/SysPartCode/analysis/tools/egalito/src/build_x86_64/libegalito.so (0x00007fa63a2b8000)
+# libcapstone.so.4 => /workspace/SysPartCode/analysis/tools/egalito/dep/capstone/install/lib/libcapstone.so.4 (0x00007fa639511000)
+# libdistorm3.so => /workspace/SysPartCode/analysis/tools/egalito/dep/distorm3/make/linux/libdistorm3.so (0x00007fa639300000)
