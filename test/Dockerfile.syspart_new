@@ -19,6 +19,14 @@ RUN --mount=type=ssh \
     git checkout 949e3339023dca94cfd2e67beefe409187e5da81 && \
     git submodule sync --recursive && \
     git submodule update --init --recursive
+COPY test/src/syspart_new/walker.h \
+     /workspace/SysPartCode/analysis/tools/egalito/src/analysis/walker.h
+COPY test/src/syspart_new/disassemble-fix.cpp \
+     /workspace/SysPartCode/analysis/tools/egalito/src/disasm/disassemble.cpp
+COPY test/src/syspart_new/syspart.cpp \
+     /workspace/SysPartCode/analysis/app/src/syspart.cpp
+COPY test/src/syspart_new/syspart.h \
+     /workspace/SysPartCode/analysis/app/src/syspart.h
 WORKDIR /workspace/SysPartCode
 RUN ./build_upgraded_egalito.sh
 # analysis/app/build_x86_64/syspart
