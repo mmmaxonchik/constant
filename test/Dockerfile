@@ -4,7 +4,7 @@ SHELL ["/bin/bash", "-lc"]
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       build-essential gdb libc6-dbg libreadline-dev \
-      git openssh-client ca-certificates lsb-release && \
+      git openssh-client ca-certificates lsb-release patch && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
 RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh && \
@@ -16,6 +16,10 @@ RUN --mount=type=ssh \
     git checkout 1469319ba6ea7cab87638c1f879541e78d72d470 && \
     git submodule sync --recursive && \
     git submodule update --init --recursive
+COPY test/src/sysfilter/egalito-patches.patch /workspace/egalito-patches.patch
+COPY test/src/sysfilter/sysfilter-patches.patch /workspace/sysfilter-patches.patch
+RUN cd /workspace/sysfilter/extraction/egalito && patch -p1 < /workspace/egalito-patches.patch
+RUN cd /workspace/sysfilter/ && patch -p1 < /workspace/sysfilter-patches.patch
 WORKDIR /workspace/sysfilter/
 RUN cd extraction && make -j"$(nproc)"
 # extraction/app/build_x86_64/sysfilter_extract
@@ -45,6 +49,37 @@ RUN --mount=type=ssh \
     git submodule update --init --recursive
 WORKDIR /workspace/SysPartCode
 RUN ./build.sh
+# analysis/app/build_x86_64/syspart
+# libegalito.so => /workspace/SysPartCode/analysis/tools/egalito/src/build_x86_64/libegalito.so (0x00007fa63a2b8000)
+# libcapstone.so.4 => /workspace/SysPartCode/analysis/tools/egalito/dep/capstone/install/lib/libcapstone.so.4 (0x00007fa639511000)
+# libdistorm3.so => /workspace/SysPartCode/analysis/tools/egalito/dep/distorm3/make/linux/libdistorm3.so (0x00007fa639300000)
+FROM ubuntu:18.04 AS syspart_new_build
+ENV DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-lc"]
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      make g++ build-essential \
+      libreadline-dev gdb lsb-release unzip \
+      libc6-dbg libstdc++6-7-dbg \
+      libunwind-dev python3 \
+      git openssh-client ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
+RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh && \
+    ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> /root/.ssh/known_hosts
+RUN --mount=type=ssh \
+    git clone --depth=1 git@github.com:vidyalakshmir/SysPartCode.git /workspace/SysPartCode && \
+    cd /workspace/SysPartCode && \
+    git fetch --depth=1 origin 949e3339023dca94cfd2e67beefe409187e5da81 && \
+    git checkout 949e3339023dca94cfd2e67beefe409187e5da81 && \
+    git submodule sync --recursive && \
+    git submodule update --init --recursive
+COPY test/src/syspart_new/egalito-patches.patch /workspace/egalito-patches.patch
+COPY test/src/syspart_new/syspart_new-patches.patch /workspace/syspart_new-patches.patch
+RUN cd /workspace/SysPartCode/analysis/tools/egalito && patch -p1 < /workspace/egalito-patches.patch
+RUN cd /workspace/SysPartCode && patch -p1 < /workspace/syspart_new-patches.patch
+WORKDIR /workspace/SysPartCode
+RUN ./build_upgraded_egalito.sh
 # analysis/app/build_x86_64/syspart
 # libegalito.so => /workspace/SysPartCode/analysis/tools/egalito/src/build_x86_64/libegalito.so (0x00007fa63a2b8000)
 # libcapstone.so.4 => /workspace/SysPartCode/analysis/tools/egalito/dep/capstone/install/lib/libcapstone.so.4 (0x00007fa639511000)
@@ -140,13 +175,14 @@ RUN apt-get update && \
       libstdc++6-7-dbg \
       libunwind-dev \
       python3.7 python3-pip binutils gcc libc6-dev linux-libc-dev build-essential \
-      file golang-go git && \
+      file golang-go git nginx redis-server etcd memcached apache2 && \
     rm -rf /var/lib/apt/lists/* && \
     go get -u github.com/xfernando/go2seccomp
 RUN mkdir -p \
       /opt/tools/bin \
       /opt/sysfilter/lib \
       /opt/syspart/lib \
+      /opt/syspart_new/lib \
       /opt/chestnut \
       /opt/confine \
       /opt/test \
@@ -175,6 +211,18 @@ COPY --from=syspart_build \
 COPY --from=syspart_build \
     /workspace/SysPartCode/analysis/tools/egalito/dep/distorm3/make/linux/libdistorm3.so \
     /opt/syspart/lib/
+COPY --from=syspart_new_build \
+    /workspace/SysPartCode/analysis/app/build_x86_64/syspart \
+    /opt/tools/bin/syspart_new.bin
+COPY --from=syspart_new_build \
+    /workspace/SysPartCode/analysis/tools/egalito/src/build_x86_64/libegalito.so \
+    /opt/syspart_new/lib/
+COPY --from=syspart_new_build \
+    /workspace/SysPartCode/analysis/tools/egalito/dep/capstone/install/lib/libcapstone.so.4 \
+    /opt/syspart_new/lib/
+COPY --from=syspart_new_build \
+    /workspace/SysPartCode/analysis/tools/egalito/dep/distorm3/make/linux/libdistorm3.so \
+    /opt/syspart_new/lib/
 COPY --from=chestnut_clone \
     /workspace/chestnut/Binalyzer \
     /opt/chestnut/Binalyzer
@@ -196,8 +244,14 @@ RUN cat > /opt/tools/bin/syspart <<'SH' && chmod +x /opt/tools/bin/syspart
 export LD_LIBRARY_PATH=/opt/syspart/lib
 exec /opt/tools/bin/syspart.bin "$@"
 SH
+RUN cat > /opt/tools/bin/syspart_new <<'SH' && chmod +x /opt/tools/bin/syspart_new
+#!/bin/sh
+export LD_LIBRARY_PATH=/opt/syspart_new/lib
+exec /opt/tools/bin/syspart_new.bin "$@"
+SH
 COPY test/src/chestnut/main.py /opt/chestnut/Binalyzer/main.py
 COPY test/src/confine/main.py /opt/confine/main.py
+COPY test/run-test.sh /workspace/run-test.sh
 ENV PATH="/opt/tools/bin:${PATH}"
 WORKDIR /workspace
 CMD ["/bin/bash"]

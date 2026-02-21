@@ -1,0 +1,228 @@
+diff --git a/src/analysis/walker.h b/src/analysis/walker.h
+index f29d711c..83d828d9 100644
+--- a/src/analysis/walker.h
++++ b/src/analysis/walker.h
+@@ -14,21 +14,44 @@ private:
+ 
+ protected:
+     DFSWalkerBase(GraphBase *graph) : graph(graph) {}
++
+     void walk(int id, int dir) {
+-        visited.assign(graph->getCount(), false);
++        const size_t count = (graph ? graph->getCount() : 0);
++        visited.assign(count, false);
+         reset();
++
++        // Nothing to traverse, or invalid start node.
++        if(count == 0 || id < 0 || static_cast<size_t>(id) >= count) {
++            finish();
++            return;
++        }
++
+         walkHelper(id, dir);
+         finish();
+     }
+ 
+     void walkAll(int id, int dir) {
+-        visited.assign(graph->getCount(), false);
++        const size_t count = (graph ? graph->getCount() : 0);
++        visited.assign(count, false);
+         reset();
+-        walkHelper(id, dir);
+-        for(size_t i = 1; i < graph->getCount(); i++) {
++
++        // Nothing to traverse.
++        if(count == 0) {
++            finish();
++            return;
++        }
++
++        // Traverse the requested component first (if valid).
++        if(id >= 0 && static_cast<size_t>(id) < count) {
++            walkHelper(id, dir);
++        }
++
++        // Then traverse any remaining disconnected components.
++        for(size_t i = 0; i < count; i++) {
++            if(static_cast<int>(i) == id) continue;
+             if(!visited[i]) {
+                 tick();
+-                walkHelper(i, dir);
++                walkHelper(static_cast<int>(i), dir);
+             }
+         }
+         finish();
+@@ -36,18 +59,30 @@ protected:
+ 
+ private:
+     void walkHelper(int id, int dir) {
++        // Hard guards against empty graphs / invalid ids / missing nodes.
++        if(id < 0 || static_cast<size_t>(id) >= visited.size()) return;
++        if(!graph) return;
++        auto *node = graph->get(id);
++        if(!node) return;
++
+         visited[id] = true;
+-        preVisit(graph->get(id));
+-        for(auto link : graph->get(id)->getLinks(dir)) {
++        preVisit(node);
++
++        for(auto link : node->getLinks(dir)) {
+             auto n = link->getTargetID();
++            if(n < 0 || static_cast<size_t>(n) >= visited.size()) {
++                continue;
++            }
++
+             if(!visited[n]) {
+-                walkHelper(link->getTargetID(), dir);
++                walkHelper(n, dir);
+             }
+             else {
+-                lateVisit(graph->get(id), &*link);
++                lateVisit(node, &*link);
+             }
+         }
+-        postVisit(graph->get(id));
++
++        postVisit(node);
+     };
+ 
+     DerivedType &derived() {
+diff --git a/src/disasm/disassemble.cpp b/src/disasm/disassemble.cpp
+index 924d44f4..b5d39310 100644
+--- a/src/disasm/disassemble.cpp
++++ b/src/disasm/disassemble.cpp
+@@ -649,54 +649,64 @@ FunctionList *DisassembleX86Function::linearDisassembly(const char *sectionName,
+ 
+     // Find known functions from DWARF info
+     IntervalTree knownFunctions(sectionRange);
+-    for(auto it = dwarfInfo->fdeBegin(); it != dwarfInfo->fdeEnd(); it ++) {
+-        DwarfFDE *fde = *it;
+-        Range range(fde->getPcBegin(), fde->getPcRange());
+-        if(knownFunctions.add(range)) {
+-            LOG(12, "DWARF FDE at [" << std::hex << fde->getPcBegin() << ",+"
+-                << fde->getPcRange() << "]");
+-        }
+-        else {
+-            LOG(1, "FDE is out of bounds of .text section, skipping");
++    if (dwarfInfo) {
++        for (auto it = dwarfInfo->fdeBegin(); it != dwarfInfo->fdeEnd(); ++it) {
++            DwarfFDE *fde = *it;
++            Range range(fde->getPcBegin(), fde->getPcRange());
++            if (knownFunctions.add(range)) {
++                LOG(12, "DWARF FDE at [" << std::hex << fde->getPcBegin() << ",+"
++                    << fde->getPcRange() << "]");
++            } else {
++                LOG(1, "FDE is out of bounds of .text section, skipping");
++            }
+         }
++    } else {
++        LOG(1, "No DWARF info; skipping FDE-based known-functions discovery");
+     }
+ 
+     // Known functions from symbol information as well
+-    for(size_t i = 0; i < dynamicSymbolList->getCount(); i ++) {
+-        Symbol *symbol = dynamicSymbolList->get(i);
+-        // only care about functions/ifuncs
+-        if(symbol->getType() != Symbol::TYPE_FUNC
+-            && symbol->getType() != Symbol::TYPE_IFUNC) {
+-
+-            continue;
+-        }
+-        if(symbol->getSize() == 0) {
+-            LOG(1, "dynamic function [" << symbol->getName()
+-                << "] has size 0, skipping.");
+-            continue;
+-        }
+-        Range range(symbol->getAddress(), symbol->getSize());
+-        if(knownFunctions.add(range)) {
+-            LOG(12, "Dynamic symbol at [" << std::hex << symbol->getAddress()
+-                << ",+" << symbol->getSize() << "]");
+-        }
+-        else {
+-            LOG(1, "Dynamic symbol is out of bounds of .text section, skipping");
++    if(dynamicSymbolList) {
++        for(size_t i = 0; i < dynamicSymbolList->getCount(); i ++) {
++            Symbol *symbol = dynamicSymbolList->get(i);
++            // only care about functions/ifuncs
++            if(symbol->getType() != Symbol::TYPE_FUNC
++                && symbol->getType() != Symbol::TYPE_IFUNC) {
++                continue;
++            }
++            if(symbol->getSize() == 0) {
++                LOG(1, "dynamic function [" << symbol->getName()
++                    << "] has size 0, skipping.");
++                continue;
++            }
++            Range range(symbol->getAddress(), symbol->getSize());
++            if(knownFunctions.add(range)) {
++                LOG(12, "Dynamic symbol at [" << std::hex << symbol->getAddress()
++                    << ",+" << symbol->getSize() << "]");
++            }
++            else {
++                LOG(1, "Dynamic symbol is out of bounds of .text section, skipping");
++            }
+         }
+     }
+-
+     // Run first disassembly pass, to find obvious function boundaries
+     IntervalTree splitRanges(sectionRange);
+     splitRanges.add(sectionRange);
+     splitRanges.splitAt(elfMap->getEntryPoint());
+     if(auto s = elfMap->findSection(".init_array")) {
+-        for(size_t i = 0; i < s->getSize(); i ++) {
+-            splitRanges.splitAt(*reinterpret_cast<address_t *>(s->getReadAddress() + i));
++        // .init_array is an array of pointers (address_t), not byte offsets.
++        auto base = s->getReadAddress();
++        auto n = s->getSize() / sizeof(address_t);
++        for(size_t i = 0; i < n; i ++) {
++            address_t addr = *reinterpret_cast<const address_t *>(base + i * sizeof(address_t));
++            if(addr != 0) splitRanges.splitAt(addr);
+         }
+     }
+     if(auto s = elfMap->findSection(".fini_array")) {
+-        for(size_t i = 0; i < s->getSize(); i ++) {
+-            splitRanges.splitAt(*reinterpret_cast<address_t *>(s->getReadAddress() + i));
++        auto base = s->getReadAddress();
++        auto n = s->getSize() / sizeof(address_t);
++        for(size_t i = 0; i < n; i ++) {
++            address_t addr = *reinterpret_cast<const address_t *>(base + i * sizeof(address_t));
++            if(addr != 0) splitRanges.splitAt(addr);
+         }
+     }
+ 
+@@ -769,14 +779,14 @@ FunctionList *DisassembleX86Function::linearDisassembly(const char *sectionName,
+         LOG(11, "Split into function " << range << " at section offset "
+             << section->convertVAToOffset(range.getStart()));
+         Function *function = fuzzyFunction(range, section);
+-
+-        if(auto dsym = dynamicSymbolList->find(range.getStart())) {
+-            LOG(12, "    renaming fuzzy function [" << function->getName()
+-                << "] to [" << dsym->getName() << "]");
+-            function->setName(dsym->getName());
+-            function->setDynamicSymbol(dsym);
++        if(dynamicSymbolList) {
++            if(auto dsym = dynamicSymbolList->find(range.getStart())) {
++                LOG(12, "    renaming fuzzy function [" << function->getName()
++                    << "] to [" << dsym->getName() << "]");
++                function->setName(dsym->getName());
++                function->setDynamicSymbol(dsym);
++            }
+         }
+-
+         functionList->getChildren()->add(function);
+         function->setParent(functionList);
+     }
+@@ -876,7 +886,11 @@ FunctionList *DisassembleAARCH64Function::linearDisassembly(
+ 
+     auto section = elfMap->findSection(sectionName);
+     if(!section) return nullptr;
+-
++    SymbolList emptyDynSyms;
++    if(dynamicSymbolList == nullptr) {
++        LOG(1, "No dynamic symbol list (.dynsym) found; continuing without dynsym.");
++        dynamicSymbolList = &emptyDynSyms;
++    }
+     //TemporaryLogLevel tll("disasm", 10);
+ 
+     address_t codeStart = section->getVirtualAddress();
